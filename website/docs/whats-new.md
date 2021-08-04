@@ -2,7 +2,11 @@
 title: What's new in v0.17
 ---
 
-This is a distillation of what's new in Orbit v0.17, intended as a reference for developers who need to upgrade their apps and libraries from v0.16.
+This is a distillation of what's new in Orbit v0.17, intended as a reference for
+developers who need to upgrade their apps and libraries from v0.16.
+
+If you're brand new to Orbit yourself, you may wish to skip this section in
+order to explore Orbit's latest features in a broader context.
 
 ## New Site + API Reference
 
@@ -181,13 +185,187 @@ single member of an array.
 
 ## Full vs. data-only responses
 
-All requests (queries and updates) can now be made with the `{ fullResponse:
-true }` option to receive responses in the form `{ data, details, transforms,
-sources }`. `data` will include the primary data that would be returned without
-the `fullResponse` option. `details` includes response details particular to the
-source, and `sources` includes a named map of all the responses from downstream
-sources that participated in this request. This allows you to access full
-response documents, inverse operations, etc. _from the initial request call
-point_.
+All requests (queries and updates) can now be made with the `{ fullResponse: true }` option to receive responses as a
+[`FullResponse`](./api/data/interfaces/FullResponse.md). Full responses include
+the following members:
 
-***TODO: This document is a WIP***
+- `data` - the primary data that would be returned without the `fullResponse`
+  option
+
+- `details` - response details particular to the source. For `MemorySource`, this
+  will include applied and inverse operations. For a `JSONAPISource`, this will
+  include `Response` objects and documents.
+
+- `transforms` - these are the transforms applied as a result of this request.
+  They are always emitted with a `transform` event, which hooks into Orbit's
+  sync flow.
+
+- `sources` - a map of source-specific response details from downstream sources
+  that were engaged in fulfilling this request.
+
+It's now up to you just how much of this information you want at the call site.
+The following requests will be handled the same internally:
+
+```typescript
+// Just the data
+const planets = await source.query((q) => q.findRecords('planet'));
+
+// All the details
+const { data, details, transforms, sources } = await source.query(
+  (q) => q.findRecords('planet'),
+  { fullResponse: true }
+);
+```
+
+## Improved response typings
+
+Speaking of responses, it's now possible to type them using [TypeScript
+generics](https://www.typescriptlang.org/docs/handbook/2/generics.html) instead
+of relying on type coercion (i.e. `response as Type`).
+
+Standard data requests can type the response data:
+
+```typescript
+// query<RequestData>(queryOrExpressions, options, id?): Promise<RequestData>
+const planets = await source.query<Planet[]>((q) => q.findRecords('planet'));
+```
+
+Full data requests can type the response data, details, and operation:
+
+```typescript
+// query<RequestData, RequestDetails, RequestOperation>(queryOrExpressions, options, id?): Promise<FullResponse<RequestData, RequestDetails, RequestOperation>>;
+const { data, details, transforms, sources } = await source.query<
+  Planet[],
+  JSONAPIResponse[],
+  RecordOperation
+>((q) => q.findRecords('planet'), { fullResponse: true });
+```
+
+## Deprecation of `Pullable` and `Pushable` interfaces
+
+Now that responses can include full processing details, everything that was
+unique to the `pull` and `push` methods on source is redundant. The `Pullable`
+and `Pushable` interfaces have been deprecated to focus on the more capable
+`Queryable` and `Updatable` interfaces for making requests.
+
+One common use case for `pull` / `push` was restoring from backup:
+
+```typescript
+const transform = await backup.pull((q) => q.findRecords());
+await memory.push(transform);
+```
+
+This can be achieved as follows with `query` / `sync` (or `update`):
+
+```typescript
+const allRecords = await backup.query((q) => q.findRecords());
+await memory.sync((t) => allRecords.map((r) => t.addRecord(r)));
+```
+
+And if you do want access to the transforms that result from a request, specify
+that you want a full response:
+
+```typescript
+const { transforms } = await source.update((t) => [
+    t.addRecord(type: 'planet', attributes: { name: 'Earth' }),
+    t.addRecord(type: 'planet', attributes: { name: 'Jupiter' })
+  ],
+  { fullResponse: true }
+);
+```
+
+## Transform buffers for faster cache processing
+
+Record-cache-based sources that interact with browser storage have had
+performance issues when dealing with large datasets, especially when paired with
+read/write heavy processors that ensure relationship tracking and correctness. A
+new paradigm has been developed, the `RecordTransformBuffer`, that acts as a
+memory buffer for these operations.
+
+For now, using this buffer is opt-in, with the `{ useBuffer: true }` option:
+
+```typescript
+await indexeddbSource.update((t) => [
+    t.addRecord(type: 'planet', attributes: { name: 'Earth' }),
+    t.addRecord(type: 'planet', attributes: { name: 'Jupiter' })
+  ],
+  { useBuffer: true }
+);
+```
+
+Performance improvements are quite promising, and stability seems solid.
+
+:::caution
+
+The only edge cases we've found to be concerned about are related to cascading
+deletes, which are triggered when record relationships are defined with
+`dependent: delete`. In those cases, the cascade may not be as complete in the
+buffer as in the actual cache, so we recommend avoiding transform buffers for
+now.
+
+:::
+
+## New serializers
+
+Concepts of serialization have, up until now, been very specific to usage by the
+`JSONAPISource`, and particularly the `JSONAPISerializer` class. This class has
+been deprecated and replaced with a series of composable serializers all build
+upon a simple and flexible
+[`Serializer`](./api/serializers/interfaces/Serializer.md) interface. This
+interface, as well as some serializers for primitives (booleans, dates,
+date-times, etc.) have been published in a new package,
+[`@orbit/serializers`](./api/serializers/index.md). And of course, new
+serializers particular to JSON:API have been added to
+[`@orbit/jsonapi`](./api/jsonapi/index.md).
+
+**_TODO: This section is a WIP_**
+
+## New validators
+
+A common source of problems for Orbit developers has been using data that is
+malformed or doesn't align with a schema's expectations. This can cause
+confusing errors during processing by a cache or downstream source. To address
+this problem, we're introducing "validators", which are shipped in a new package
+[`@orbit/validators`](./api/validators/index.md) along with some validators for
+primitive types. Validators that are record-specific have also been included in
+[`@orbit/records`](./api/records/index.md).
+
+**_TODO: This section is a WIP_**
+
+## Record normalizers
+
+When building queries and transforms, some scenarios have been more tedious than
+necessary: identifying records by a key instead of `id`, for instance, or using
+a model class from a lib like ember-orbit to reference a record instead of its
+json identity. A new abstraction has been added to make query and transform
+builders more flexible: record normalizers. Record normalizers implement the
+[`RecordNormalizer`](./api/records/interfaces/RecordNormalizer.md) interface
+and convert record identities and/or data into a normalized form. The new base
+normalizer now allows `{ type, key, value }` to be used anywhere that `{ type,
+id }` identities can be used, which significantly reduces the annoyance of
+working with remote keys.
+
+**_TODO: This section is a WIP_**
+
+## Synchronous change tracking in memory forks
+
+Previously, memory source forks behaved precisely like other memory sources:
+every trackable update applied at the source level (and thus async). Now, the
+default (but overrideable) behavior is to track changes at the cache level in
+forks. Thus synchronous changes can be made to a forked cache and then merged
+back into the base source. This better accomodates the most common use case for
+forks: editing form data in isolation before merging coalesced changes back to
+the base.
+
+**_TODO: This section is a WIP_**
+
+## Debug mode
+
+A new `debug` setting has been added to the `Orbit`
+global, that toggles between using a more verbose, developer-friendly "debug"
+mode of Orbit vs. a leaner, more performant production mode. Since debug mode
+is enabled by default, you'll need to set `Orbit.debug = false` in order to
+eliminate deprecation warnings, avoid installing validation cache processors
+by default, and other debug-friendly features.
+
+**_TODO: This section is a WIP_**
